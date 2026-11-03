@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund --ignore-scripts
+      - run: npm run lint
+      - run: npm run format:check
+
+  typecheck:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund --ignore-scripts
+      - run: npm run typecheck
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: bevox_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund --ignore-scripts
+      # Audit 2026-06-02 / j-build-01: tests/integration/mcp-server.stdio.test.ts
+      # invoca o binary compilado em dist/bin/bevox-mcp.js. Sem build prévio,
+      # esse teste falha com "Compiled binary missing — run `npm run build`".
+      # Mantemos o passo de Build como job separado (gera o GHCR), mas o
+      # vitest runner também precisa do dist localmente.
+      - run: npm run build
+      - run: npm test
+        env:
+          # Audit 2026-06-02 / D-02 (issue #48): without RUN_INTEGRATION=1,
+          # 16/22 integration tests gate themselves with `describe.skipIf(!RUN)`
+          # (or equivalent) and are silently skipped — making
+          # execution-handler, memory-repositories, bullmq-consumer,
+          # migrations, callbacks, SDR workflows, and RAG/vector-store
+          # invisible to CI. Setting it here is what wires the already-declared
+          # Postgres/Redis services into the suite.
+          RUN_INTEGRATION: "1"
+          DATABASE_URL: postgres://postgres:test@localhost:5432/bevox_test
+          REDIS_URL: redis://localhost:6379
+          OPENAI_API_KEY: sk-test-stub
+          BEVOX_CALLBACK_BASE_URL: http://localhost:3000
+          CALENDAR_SERVICE_URL: http://localhost:3009/api
+          DEFAULT_LLM_PROVIDER: openai
+          DEFAULT_LLM_MODEL: gpt-4o-mini
+          HARNESS_QUEUE_NAME: execution.dispatch.agent_harness
+          HARNESS_MAX_EXECUTION_TIME_MS: "120000"
+          HARNESS_LOG_LEVEL: error
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund --ignore-scripts
+      - run: npm run build

@@ -1,0 +1,24 @@
+name: list-appointments
+version: 1.0.0
+description: List appointments for a calendar within a date range.
+category: calendar
+agentType: surface
+parameters:
+  type: object
+  required: [calendar_id, date_from, date_to]
+  properties:
+    calendar_id:
+      type: string
+    date_from:
+      type: string
+      description: ISO date
+    date_to:
+      type: string
+      description: ISO date
+    status:
+      type: string
+      enum: [scheduled, cancelled, completed, no_show]
+permissions:
+  requires: []
+  sideEffects: [read, external_call]
+entry: index

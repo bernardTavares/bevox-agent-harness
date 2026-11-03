@@ -1,0 +1,35 @@
+{
+  "id": "sdr-enabled-outreach",
+  "description": "SDR profile enabled: agent produces a compliant outreach message that passes all three certification gates.",
+  "agent_config": {
+    "system_prompt": "You are an SDR agent for Bevox. Always research the prospect before reaching out.",
+    "sdr_profile": {
+      "enabled": true,
+      "qualification_framework": "PACT"
+    }
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "I'm the VP of Sales at Acme Corp. We're struggling with pipeline visibility — our forecasts are always off and our team is losing deals we should be winning. Can you help?"
+    }
+  ],
+  "llm_responses": [
+    {
+      "content": "{\"thinking\":\"The prospect is a VP of Sales with explicit pain around pipeline visibility and forecast accuracy. I should craft a single-CTA outreach that articulates their persona and pain without over-claiming qualification.\",\"text\":\"Hi — I noticed Acme Corp's sales team is dealing with forecast accuracy challenges and pipeline visibility gaps, which often hit revenue targets hard for VP-level leaders managing fast-moving teams. Many VPs in your position face the same struggle: data arrives too late, and the CRM doesn't reflect reality. Would you be open to a 15-minute call to explore whether there's a fit?\"}",
+      "tool_calls": [],
+      "usage": { "input_tokens": 50, "output_tokens": 80, "total_tokens": 130 },
+      "model": "fake-model",
+      "provider": "fake",
+      "latency_ms": 10
+    }
+  ],
+  "judge_response": {
+    "content": "{\"score\":0.85,\"reasoning\":\"The response explicitly names the VP persona and articulates pipeline visibility and forecast accuracy as buyer pains. Two dimensions (persona + pain) are clearly present with account-specific grounding.\"}",
+    "tool_calls": [],
+    "usage": { "input_tokens": 20, "output_tokens": 40, "total_tokens": 60 },
+    "model": "fake-judge",
+    "provider": "fake",
+    "latency_ms": 5
+  }
+}

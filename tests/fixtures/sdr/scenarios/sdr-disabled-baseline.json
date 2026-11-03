@@ -1,0 +1,23 @@
+{
+  "id": "sdr-disabled-baseline",
+  "description": "No sdr_profile: the resolved system prompt must equal EXACTLY the input agent_config.system_prompt (zero-cost gate §4.4).",
+  "agent_config": {
+    "system_prompt": "BASELINE_SYSTEM_PROMPT_NO_SDR"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello, I would like some information."
+    }
+  ],
+  "llm_responses": [
+    {
+      "content": "{\"thinking\":\"Generic user request with no SDR context.\",\"text\":\"Hello! I'd be happy to help. Could you let me know what specific information you're looking for?\"}",
+      "tool_calls": [],
+      "usage": { "input_tokens": 20, "output_tokens": 30, "total_tokens": 50 },
+      "model": "fake-model",
+      "provider": "fake",
+      "latency_ms": 5
+    }
+  ]
+}

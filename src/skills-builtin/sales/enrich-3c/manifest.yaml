@@ -1,0 +1,50 @@
+name: enrich-3c
+version: 1.0.0
+description: >
+  Assemble a Company / Contact / ConversationStarter (3-C) enrichment card for an
+  SDR outreach. Performs one read-only SELECT on sdr_account_state to incorporate
+  any existing PACT snapshot and SDR lifecycle status. Degrades gracefully when the
+  DB is unavailable or no state row exists — always returns a usable 3-C result from
+  params alone. Openers use static heuristics (no runtime file I/O).
+  READ side effect only — no writes, no HTTP, no stop signals.
+category: sales
+agentType: surface
+parameters:
+  type: object
+  required:
+    - companyName
+  properties:
+    companyName:
+      type: string
+      description: Legal or trading name of the target company.
+    companyIndustry:
+      type: string
+      description: Primary industry or vertical (e.g. "SaaS", "FinTech", "Healthcare").
+    companySize:
+      type: string
+      description: >
+        Employee headcount range or band (e.g. "50-200", "1000+").
+        Used to select the appropriate opener heuristic tier.
+    companyWebsite:
+      type: string
+      description: Primary website URL of the target company (optional).
+    contactName:
+      type: string
+      description: Full name of the primary contact at the company.
+    contactTitle:
+      type: string
+      description: Job title or role of the contact (e.g. "VP of Sales", "CTO").
+    contactLinkedIn:
+      type: string
+      description: LinkedIn profile URL of the contact (optional).
+    recentTrigger:
+      type: string
+      description: >
+        A recent observable event (funding round, product launch, leadership change, job posting)
+        that creates a relevant hook for the ConversationStarter. Optional — enriches the opener
+        when provided.
+permissions:
+  requires: []
+  sideEffects:
+    - read
+entry: index

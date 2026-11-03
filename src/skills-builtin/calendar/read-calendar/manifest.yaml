@@ -1,0 +1,22 @@
+name: read-calendar
+version: 1.0.0
+description: Query available time slots for a calendar on a given date.
+category: calendar
+agentType: surface
+parameters:
+  type: object
+  required: [calendar_id, date]
+  properties:
+    calendar_id:
+      type: string
+    date:
+      type: string
+      description: ISO date, e.g. 2026-04-10
+    service_id:
+      type: string
+    member_id:
+      type: string
+permissions:
+  requires: []
+  sideEffects: [read, external_call]
+entry: index

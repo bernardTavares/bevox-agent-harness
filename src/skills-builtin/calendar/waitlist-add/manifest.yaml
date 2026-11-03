@@ -1,0 +1,25 @@
+name: waitlist-add
+version: 1.0.0
+description: Add a customer to the waitlist for a calendar.
+category: calendar
+agentType: surface
+parameters:
+  type: object
+  required: [calendar_id, customer_name]
+  properties:
+    calendar_id:
+      type: string
+    service_id:
+      type: string
+    customer_name:
+      type: string
+    preferred_date_from:
+      type: string
+      description: ISO date
+    preferred_date_to:
+      type: string
+      description: ISO date
+permissions:
+  requires: []
+  sideEffects: [write, external_call]
+entry: index

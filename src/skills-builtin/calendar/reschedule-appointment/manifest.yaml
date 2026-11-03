@@ -1,0 +1,21 @@
+name: reschedule-appointment
+version: 1.0.0
+description: Reschedule an existing appointment to a new date and time.
+category: calendar
+agentType: surface
+parameters:
+  type: object
+  required: [appointment_id, new_date, new_start_time]
+  properties:
+    appointment_id:
+      type: string
+    new_date:
+      type: string
+      description: ISO date
+    new_start_time:
+      type: string
+      description: HH:MM
+permissions:
+  requires: []
+  sideEffects: [write, external_call]
+entry: index

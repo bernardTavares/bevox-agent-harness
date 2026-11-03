@@ -1,0 +1,5 @@
+#!/bin/sh
+# Disabled on Windows — husky/lint-staged unreliable in this env.
+# Run `npm run lint` and `npm test` manually before commit.
+# See G.6 in correções pós-review for context.
+exit 0

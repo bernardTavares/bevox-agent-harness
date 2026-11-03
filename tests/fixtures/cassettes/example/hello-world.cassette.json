@@ -1,0 +1,31 @@
+{
+  "schema_version": "1",
+  "name": "example/hello-world",
+  "created_at": "2026-05-14T12:00:00.000Z",
+  "entries": [
+    {
+      "request_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+      "request_summary": {
+        "model": "gpt-4o-mini",
+        "provider": "openai",
+        "temperature": 0,
+        "n_messages": 2,
+        "n_tools": 0,
+        "has_response_schema": false
+      },
+      "response": {
+        "content": "Hello, world!",
+        "tool_calls": [],
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 4,
+          "total_tokens": 16
+        },
+        "model": "gpt-4o-mini",
+        "provider": "openai",
+        "latency_ms": 245
+      },
+      "recorded_at": "2026-05-14T12:00:01.000Z"
+    }
+  ]
+}

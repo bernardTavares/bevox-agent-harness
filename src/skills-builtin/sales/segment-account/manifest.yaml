@@ -1,0 +1,56 @@
+name: segment-account
+version: 1.0.0
+description: >
+  Classify a sales account into an ABCD segment (Bertuzzi) based on ICP fit,
+  deal-size quartile, persona reachability, and growth signals. Hard red-flag
+  conditions (do_not_contact, budget_freeze, competitor_lock_in,
+  legal_compliance_conflict) take precedence and force Dead-End classification
+  regardless of other traits. Pure compute — no DB, HTTP, or file I/O.
+category: sales
+agentType: surface
+parameters:
+  type: object
+  properties:
+    icpMatchCount:
+      type: number
+      description: >
+        Number of ICP dimensions (out of 6) that this account satisfies.
+        A=6, B=4-5, C=2-3, D=0-1 (before red-flag override).
+    personaPresent:
+      type: boolean
+      description: >
+        True if at least one target persona title or role is present at the account.
+    personaReachable:
+      type: boolean
+      description: >
+        True if the target persona can be contacted via known channels
+        (LinkedIn, direct email, referral). False if gated or unknown.
+    dealSizeQuartile:
+      type: string
+      enum: [top, mid, low, unknown]
+      description: >
+        Estimated deal size relative to the ACV range.
+        top = top quartile (A-signal), mid = median range (B-signal),
+        low = below median (C-signal), unknown = not assessed.
+    growthSignals:
+      type: boolean
+      description: >
+        True if the account shows active growth signals (hiring, funding,
+        expansion announcements) consistent with the A-account profile.
+    redFlags:
+      type: array
+      items:
+        type: string
+        enum:
+          - do_not_contact
+          - budget_freeze
+          - competitor_lock_in
+          - legal_compliance_conflict
+      description: >
+        Hard red-flag conditions observed for this account. Any entry
+        immediately forces Dead-End (D) classification, overriding all
+        other scoring criteria. Maps to red-flags.md §Hard Red Flags.
+permissions:
+  requires: []
+  sideEffects: []
+entry: index

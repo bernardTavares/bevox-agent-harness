@@ -1,0 +1,2054 @@
+openapi: 3.1.0
+
+info:
+  title: Bevox Agent Harness — API de Integração
+  version: 1.0.0
+  description: |
+    Documentação das interfaces de integração do Agent Harness da Bevox.
+
+    O harness **não expõe** uma REST API diretamente. Ele:
+    - **Consome** payloads de execução despachados pela Bevox via BullMQ (documentados como webhook)
+    - **Chama** a Callback API da Bevox ao longo do ciclo de execução
+    - **Chama** a Calendar Service API para operações de agendamento
+    - **Chama** APIs de provedores LLM externos (OpenAI e Gemini)
+
+    ### Fluxo de execução interno
+    1. Payload de despacho é recebido via fila BullMQ → validado pelo Zod schema
+    2. Deduplicação via Redis SET NX (TTL 1 hora)
+    3. `updateStatus` → `running`
+    4. Pipeline: `MessageAnalyzerAgent` → `MemoryExtractorAgent` → `AgentRouter`
+    5. Surface agent executa loop de raciocínio (ReAct / Plan-Execute / ReWOO)
+    6. `sendComplete` com resposta, sentimento e estratégia
+  contact:
+    name: Time de Engenharia Bevox
+  license:
+    name: Proprietário
+
+tags:
+  - name: Dispatch Payload
+    description: |
+      Schema do payload que o harness recebe da Bevox via fila BullMQ.
+      Documentado como webhook pois é consumido de forma assíncrona, não via HTTP direto.
+  - name: Bevox Callbacks
+    description: |
+      Endpoints que o harness chama na API da Bevox durante e após a execução.
+      Base URL configurada em `BEVOX_CALLBACK_BASE_URL`. Todas as requisições incluem
+      o header `X-Execution-Token` para autenticação por execução.
+  - name: Calendar Service
+    description: |
+      Endpoints da Calendar Service chamados pelo harness durante a execução de agentes
+      de agendamento. Base URL configurada em `CALENDAR_SERVICE_BASE_URL`.
+      Requisições autenticadas via `Authorization: Bearer <token>` quando aplicável.
+  - name: LLM Providers
+    description: |
+      APIs de provedores LLM externos chamadas pelo LLMGateway do harness.
+      O provedor e modelo padrão são configurados via `DEFAULT_LLM_PROVIDER` e
+      `DEFAULT_LLM_MODEL`. Suporte a OpenAI e Gemini.
+
+# ---------------------------------------------------------------------------
+# Webhook — Dispatch Payload (recebido via BullMQ, não via HTTP)
+# ---------------------------------------------------------------------------
+x-webhooks:
+  AgentDispatch:
+    post:
+      tags:
+        - Dispatch Payload
+      summary: Payload de despacho de execução
+      description: |
+        Payload serializado que a Bevox envia para a fila BullMQ `agent-harness`.
+        O worker do harness consume este job, valida com Zod e inicia o pipeline de execução.
+
+        ### Deduplicação
+        Ao receber o payload, o harness tenta adquirir uma chave Redis
+        `harness:dedup:{execution_id}` com SET NX + TTL de 3600 segundos.
+        Se a chave já existir, o job é descartado silenciosamente.
+
+        ### Tenancy (ADR-019 / _shared/ADR-021)
+        O único identificador de tenant é `organization_id` (UUID). O léxico
+        legado `account_id` / `account` / `workspace_id` foi retirado após
+        ADR-019 / ADR-021 e não é mais aceito.
+
+        ### Modo de autonomia (ADR-006)
+        `execution_mode` define o comportamento das tools de mutação:
+        `autonomous_supervised` executa; `manual_assisted` e `copilot`
+        retornam proposals (sem efeito externo). Opcional no schema com
+        default conservador `autonomous_supervised` para retrocompat.
+
+        ### Campos de agent_config relevantes
+        - `default_model` — string validada (charset/length/allowlist de provider: openai|gemini|anthropic)
+        - `system_prompt` — instrução de sistema injetada no input do surface agent
+      operationId: agentDispatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DispatchPayload'
+            examples:
+              agendamento_basico:
+                summary: Solicitação de agendamento simples (autônomo)
+                value:
+                  execution_id: "01890b2e-7c3a-7e6f-9a21-3f8c2d4e6b10"
+                  execution_token: "exec_tok_3f8c2d4e6b10a1b2c3d4e5f6"
+                  callback_base_url: "http://bevox-backend:3000"
+                  organization_id: "9b2e7c3a-4d5e-6f70-8192-a3b4c5d6e7f8"
+                  execution_mode: "autonomous_supervised"
+                  conversation:
+                    id: 101
+                    channel: "whatsapp"
+                  messages:
+                    - role: "user"
+                      content: "Quero agendar uma consulta para amanhã às 14h"
+                  context:
+                    timezone: "America/Sao_Paulo"
+                  agent_config:
+                    default_model: "openai/gpt-4o"
+                    system_prompt: "Você é um assistente de agendamento da Clínica Bevox."
+                  skills:
+                    - "create-appointment"
+                    - "read-calendar"
+                    - "send-message"
+                  account_denied_tools:
+                    - "cancel-appointment"
+                  stream: false
+              copilot_proposal:
+                summary: Modo copilot — mutações retornam proposals
+                value:
+                  execution_id: "01890b2e-8a1b-7c2d-9e3f-4a5b6c7d8e9f"
+                  execution_token: "exec_tok_9e3f4a5b6c7d8e9f0a1b2c3d"
+                  organization_id: "9b2e7c3a-4d5e-6f70-8192-a3b4c5d6e7f8"
+                  execution_mode: "copilot"
+                  messages:
+                    - role: "user"
+                      content: "Pode cancelar minha consulta de quinta?"
+                  agent_config:
+                    system_prompt: "Você é um copiloto de atendimento."
+                  skills: []
+                  account_denied_tools: []
+      responses:
+        '200':
+          description: |
+            Job processado com sucesso. O resultado real é enviado via callback
+            `POST /executions/{id}/complete`.
+
+# ---------------------------------------------------------------------------
+# Paths — Bevox Callbacks + Calendar Service + LLM Providers
+# ---------------------------------------------------------------------------
+paths:
+
+  # --------------------------------------------------------------------------
+  # Bevox Callbacks
+  # --------------------------------------------------------------------------
+
+  /api/v1/executions/{id}/traces:
+    post:
+      tags:
+        - Bevox Callbacks
+      summary: Enviar traces de raciocínio
+      description: |
+        Envia um ou mais registros de trace referentes a passos intermediários
+        da execução. Chamado após cada `step()` do reasoning engine quando um
+        `TraceCallback` está registrado.
+
+        Tipos de trace produzidos pelo harness:
+        - `thought` — cadeia de raciocínio do ReAct antes de uma ação
+        - `action` — chamada de ferramenta disparada
+        - `observation` — resumo do resultado do passo (via `observation.summary`)
+      operationId: sendTrace
+      security:
+        - ExecutionToken: []
+      parameters:
+        - $ref: '#/components/parameters/ExecutionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - traces
+              properties:
+                traces:
+                  type: array
+                  minItems: 1
+                  description: Lista de entradas de trace a registrar.
+                  items:
+                    $ref: '#/components/schemas/TraceEntry'
+            examples:
+              observation_step:
+                summary: Trace de observação de um passo
+                value:
+                  traces:
+                    - step: 0
+                      type: "observation"
+                      content: "Encontrei 3 horários disponíveis para amanhã: 9h, 14h e 16h."
+                      timestamp: "2026-04-05T10:30:00.000Z"
+      responses:
+        '200':
+          description: Traces registrados com sucesso.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ExecutionNotFound'
+
+  /api/v1/executions/{id}/stream:
+    post:
+      tags:
+        - Bevox Callbacks
+      summary: Enviar chunk de resposta em streaming
+      description: |
+        Envia um fragmento (chunk) da resposta final em tempo real,
+        permitindo que a Bevox exiba a resposta progressivamente ao usuário.
+        Os chunks são indexados sequencialmente a partir de 0.
+      operationId: sendStream
+      security:
+        - ExecutionToken: []
+      parameters:
+        - $ref: '#/components/parameters/ExecutionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StreamChunk'
+            examples:
+              primeiro_chunk:
+                summary: Primeiro fragmento da resposta
+                value:
+                  chunk: "Encontrei o seguinte horário disponível para você: "
+                  index: 0
+              segundo_chunk:
+                summary: Fragmento subsequente
+                value:
+                  chunk: "amanhã, dia 06/04, às 14h00."
+                  index: 1
+      responses:
+        '200':
+          description: Chunk recebido com sucesso.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ExecutionNotFound'
+
+  /api/v1/executions/{id}/status:
+    post:
+      tags:
+        - Bevox Callbacks
+      summary: Atualizar status da execução
+      description: |
+        Notifica a Bevox sobre mudanças de status ao longo do ciclo de vida
+        da execução. O harness emite dois valores de `status` por este
+        callback:
+
+        - `running` — sinalizado uma vez no início do `try` e, no caminho de
+          RAG assíncrono, novamente antes de retomar o loop. Best-effort (uma
+          falha do backend não derruba a execução).
+        - `dead_letter` — sinal AUTORITATIVO de dead-letter escrito pelo
+          listener `worker.on("failed")` do BullMQ quando o job esgota todas as
+          tentativas (`attempts:7`). Acompanha um objeto `meta` com
+          `action: "retry_exhausted"` mais `failedReason` e `attemptsMade` para
+          diagnóstico/replay UI. Emitido via
+          `updateStatus(id, token, "dead_letter", meta)`.
+
+        Os estados terminais de SUCESSO (`completed`) e de falha de execução
+        (`failed`) NÃO trafegam por aqui: o sucesso/falha de execução vai por
+        `POST /complete` (`strategy: "failed"` no caso de falha não recuperável).
+
+        ### Idempotência (ADR-023)
+        Quando o `meta.idempotencyKey` está presente (caso do `dead_letter`),
+        o harness o envia como header `Idempotency-Key` (NÃO no body), para o
+        backend de-duplicar o sinal caso o listener reprocesse. O restante do
+        `meta` (`action`, `failedReason`, `attemptsMade`) vai no body junto com
+        `status`.
+
+        **Nota de implementação:** o harness emite este callback via `POST`
+        (função `post()` em `src/integration/bevox-callback.ts`), apesar do
+        nome `updateStatus` sugerir semântica de atualização parcial.
+      operationId: updateStatus
+      security:
+        - ExecutionToken: []
+      parameters:
+        - $ref: '#/components/parameters/ExecutionId'
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Chave de idempotência (ADR-023) enviada no sinal `dead_letter` para
+            que o backend de-duplique callbacks reprocessados. Derivada via
+            `MutationTool.deriveIdempotencyKey` (sha256), nunca UUID aleatório.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - status
+              properties:
+                status:
+                  type: string
+                  description: |
+                    Status emitido pelo harness por este callback. `running`
+                    (intermediário, best-effort) ou `dead_letter` (sinal
+                    autoritativo de retry-exhaustion). A Bevox marca os demais
+                    estados terminais (`completed`, `failed`) a partir do
+                    `POST /complete` — não por este callback.
+                  enum:
+                    - running
+                    - dead_letter
+                  example: running
+                action:
+                  type: string
+                  description: |
+                    Razão da transição, presente apenas no sinal `dead_letter`.
+                    Acompanha `failedReason` e `attemptsMade` no body.
+                  enum:
+                    - retry_exhausted
+                  example: retry_exhausted
+                failedReason:
+                  type: string
+                  description: |
+                    Mensagem da falha final que esgotou as tentativas
+                    (`job.failedReason` ou `err.message`). Presente apenas no
+                    sinal `dead_letter`.
+                  example: "Bevox callback /complete failed: 503 Service Unavailable"
+                attemptsMade:
+                  type: integer
+                  minimum: 0
+                  description: |
+                    Número de tentativas já feitas pelo BullMQ antes do
+                    dead-letter. Presente apenas no sinal `dead_letter`.
+                  example: 7
+            examples:
+              running:
+                summary: Status intermediário (início da execução)
+                value:
+                  status: running
+              dead_letter:
+                summary: Sinal autoritativo de dead-letter (retry exhausted)
+                value:
+                  status: dead_letter
+                  action: retry_exhausted
+                  failedReason: "Bevox callback /complete failed: 503 Service Unavailable"
+                  attemptsMade: 7
+      responses:
+        '200':
+          description: Status atualizado com sucesso.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ExecutionNotFound'
+
+  /api/v1/executions/{id}/complete:
+    post:
+      tags:
+        - Bevox Callbacks
+      summary: Sinalizar conclusão da execução
+      description: |
+        Endpoint final chamado pelo harness ao término da execução —
+        com sucesso ou falha. Contém a resposta sintetizada, análise de
+        sentimento, estratégia de raciocínio usada e uso de tokens.
+
+        ### Estratégias possíveis
+        - `direct` — resposta direta sem ferramentas
+        - `react` — ReAct loop (thought → action → observation)
+        - `plan-execute` — planejamento + execução sequencial
+        - `rewoo` — planejamento paralelo com dependências
+        - `request-human` — escalado para atendente humano (sem execução de tools)
+        - `failed` — falha não recuperável durante a execução
+
+        ### Sentimentos possíveis (do MessageAnalyzerAgent)
+        - `positive`, `negative`, `neutral`
+
+        ### Campos de uso (quando disponíveis)
+        O harness atualmente envia `prompt_tokens: 0` pois o gateway LLM
+        não acumula contagem entre múltiplas chamadas de step. Pode ser
+        expandido em versões futuras.
+      operationId: sendComplete
+      security:
+        - ExecutionToken: []
+      parameters:
+        - $ref: '#/components/parameters/ExecutionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletePayload'
+            examples:
+              sucesso:
+                summary: Execução concluída com sucesso
+                value:
+                  response_text: "Seu agendamento foi confirmado para amanhã, 06/04, às 14h00 com Dr. Silva."
+                  sentiment: "positive"
+                  strategy: "react"
+                  usage:
+                    prompt_tokens: 0
+                    completion_tokens: 0
+              proposta_pendente:
+                summary: Modo não-autônomo — proposals de mutação anexados
+                value:
+                  response_text: "Posso cancelar a consulta de quinta. Confirma?"
+                  sentiment: "neutral"
+                  strategy: "react"
+                  usage:
+                    prompt_tokens: 0
+                    completion_tokens: 0
+                  proposals:
+                    - action: "create-appointment"
+                      params:
+                        service_id: "consulta-30min"
+                        date: "2026-06-04"
+                        start_time: "14:00"
+              escalado_humano:
+                summary: Escalado para humano
+                value:
+                  response_text: ""
+                  sentiment: "neutral"
+                  strategy: "request-human"
+                  usage:
+                    prompt_tokens: 0
+                    completion_tokens: 0
+              falha:
+                summary: Execução falhou
+                value:
+                  response_text: ""
+                  sentiment: "neutral"
+                  strategy: "failed"
+                  usage:
+                    prompt_tokens: 0
+                    completion_tokens: 0
+      responses:
+        '200':
+          description: Conclusão registrada com sucesso.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ExecutionNotFound'
+
+  # --------------------------------------------------------------------------
+  # Calendar Service
+  # --------------------------------------------------------------------------
+
+  /api/v1/calendars/{calendarId}/availability:
+    get:
+      tags:
+        - Calendar Service
+      summary: Consultar disponibilidade de horários
+      description: |
+        Retorna os slots de horário disponíveis para um calendário em uma data
+        específica, opcionalmente filtrados por tipo de serviço.
+        Chamado pela ferramenta `check_availability` durante a execução do surface agent.
+      operationId: getAvailability
+      security:
+        - CalendarBearer: []
+      parameters:
+        - $ref: '#/components/parameters/CalendarId'
+        - name: date
+          in: query
+          required: true
+          description: Data para consulta no formato ISO 8601 (YYYY-MM-DD).
+          schema:
+            type: string
+            format: date
+          example: "2026-04-06"
+        - name: serviceId
+          in: query
+          required: false
+          description: Identificador do tipo de serviço para filtrar horários compatíveis.
+          schema:
+            type: string
+          example: "consulta-30min"
+      responses:
+        '200':
+          description: Slots de disponibilidade retornados com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailabilityResponse'
+              examples:
+                com_slots:
+                  summary: Horários disponíveis encontrados
+                  value:
+                    date: "2026-04-06"
+                    calendar_id: "cal_789"
+                    slots:
+                      - start_time: "09:00"
+                        end_time: "09:30"
+                        available: true
+                      - start_time: "14:00"
+                        end_time: "14:30"
+                        available: true
+                      - start_time: "16:00"
+                        end_time: "16:30"
+                        available: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/CalendarNotFound'
+
+  /api/v1/calendars/{calendarId}/appointments:
+    get:
+      tags:
+        - Calendar Service
+      summary: Listar agendamentos do calendário
+      description: |
+        Retorna os agendamentos existentes de um calendário, com filtragem
+        opcional por intervalo de datas. Utilizado para consulta de histórico
+        e verificação de conflitos pelo surface agent.
+      operationId: listAppointments
+      security:
+        - CalendarBearer: []
+      parameters:
+        - $ref: '#/components/parameters/CalendarId'
+        - name: dateFrom
+          in: query
+          required: false
+          description: Data de início do intervalo (ISO 8601 YYYY-MM-DD).
+          schema:
+            type: string
+            format: date
+          example: "2026-04-01"
+        - name: dateTo
+          in: query
+          required: false
+          description: Data de fim do intervalo (ISO 8601 YYYY-MM-DD).
+          schema:
+            type: string
+            format: date
+          example: "2026-04-30"
+      responses:
+        '200':
+          description: Lista de agendamentos retornada com sucesso.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  appointments:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Appointment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/CalendarNotFound'
+    post:
+      tags:
+        - Calendar Service
+      summary: Criar novo agendamento
+      description: |
+        Cria um novo agendamento no calendário especificado.
+        Chamado pela ferramenta `create_appointment` após confirmação
+        do horário pelo usuário durante a execução do surface agent.
+      operationId: createAppointment
+      security:
+        - CalendarBearer: []
+      parameters:
+        - $ref: '#/components/parameters/CalendarId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppointmentRequest'
+            examples:
+              novo_agendamento:
+                summary: Criação de consulta
+                value:
+                  service_id: "consulta-30min"
+                  date: "2026-04-06"
+                  start_time: "14:00"
+                  customer:
+                    name: "Maria Silva"
+                    phone: "+5511999999999"
+                    email: "maria@email.com"
+                  notes: "Primeira consulta"
+      responses:
+        '201':
+          description: Agendamento criado com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Conflito — horário já ocupado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/appointments/{appointmentId}/cancel:
+    post:
+      tags:
+        - Calendar Service
+      summary: Cancelar agendamento
+      description: |
+        Cancela um agendamento existente. O campo `reason` é obrigatório
+        para fins de auditoria. Chamado pela ferramenta `cancel_appointment`.
+      operationId: cancelAppointment
+      security:
+        - CalendarBearer: []
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - reason
+              properties:
+                reason:
+                  type: string
+                  description: Motivo do cancelamento informado pelo usuário.
+                  example: "Compromisso imprevisto"
+      responses:
+        '200':
+          description: Agendamento cancelado com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AppointmentNotFound'
+
+  /api/v1/appointments/{appointmentId}:
+    patch:
+      tags:
+        - Calendar Service
+      summary: Reagendar appointment (remarcação)
+      description: |
+        Atualiza a data e horário de início de um agendamento existente.
+        Implementado internamente como `rescheduleAppointment` no calendar-client.
+        Chamado pela ferramenta `reschedule_appointment`.
+      operationId: rescheduleAppointment
+      security:
+        - CalendarBearer: []
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - newDate
+                - newStartTime
+              properties:
+                newDate:
+                  type: string
+                  format: date
+                  description: Nova data do agendamento (YYYY-MM-DD).
+                  example: "2026-04-10"
+                newStartTime:
+                  type: string
+                  description: Novo horário de início (HH:MM).
+                  example: "10:00"
+      responses:
+        '200':
+          description: Agendamento remarcado com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AppointmentNotFound'
+        '409':
+          description: Conflito — novo horário já ocupado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/calendars/{calendarId}/waitlist:
+    post:
+      tags:
+        - Calendar Service
+      summary: Adicionar à lista de espera
+      description: |
+        Insere o cliente na lista de espera do calendário quando não há
+        horários disponíveis. Chamado pela ferramenta `add_to_waitlist`
+        quando `getAvailability` retorna slots vazios.
+      operationId: addToWaitlist
+      security:
+        - CalendarBearer: []
+      parameters:
+        - $ref: '#/components/parameters/CalendarId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WaitlistRequest'
+            examples:
+              entrada_lista:
+                summary: Cliente entrando na lista de espera
+                value:
+                  service_id: "consulta-30min"
+                  preferred_dates:
+                    - "2026-04-06"
+                    - "2026-04-07"
+                  preferred_times:
+                    - "morning"
+                    - "afternoon"
+                  customer:
+                    name: "João Oliveira"
+                    phone: "+5511888888888"
+      responses:
+        '201':
+          description: Cliente adicionado à lista de espera.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  waitlist_id:
+                    type: string
+                    description: Identificador da entrada na lista de espera.
+                    example: "wl_abc123"
+                  position:
+                    type: integer
+                    description: Posição na fila de espera.
+                    example: 3
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/CalendarNotFound'
+
+  # --------------------------------------------------------------------------
+  # LLM Providers
+  # --------------------------------------------------------------------------
+
+  /v1/chat/completions:
+    post:
+      tags:
+        - LLM Providers
+      summary: OpenAI — Chat Completions
+      description: |
+        Endpoint da OpenAI chamado pelo `OpenAIAdapter` do LLMGateway.
+        URL base: `https://api.openai.com`.
+
+        O harness usa este endpoint para:
+        - Respostas com chamadas de ferramentas (`tool_choice: "auto"`)
+        - Respostas com saída estruturada JSON (`response_format.type: "json_schema"`)
+
+        **Ferramentas e saída estruturada são mutuamente exclusivos** — se
+        `tools` estiver presente, `response_format` é omitido.
+
+        ### Defaults do harness
+        - `max_tokens`: 2048
+        - `temperature`: 0
+        - `tool_choice`: `"auto"` (quando ferramentas estão disponíveis)
+      operationId: openaiChatCompletions
+      servers:
+        - url: https://api.openai.com
+          description: OpenAI API
+      security:
+        - OpenAIBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenAIChatRequest'
+            examples:
+              com_tools:
+                summary: Requisição com ferramentas
+                value:
+                  model: "gpt-4o"
+                  messages:
+                    - role: "system"
+                      content: "Você é um assistente de agendamento."
+                    - role: "user"
+                      content: "Quero agendar para amanhã às 14h."
+                  tools:
+                    - type: "function"
+                      function:
+                        name: "check_availability"
+                        description: "Verifica horários disponíveis"
+                        parameters:
+                          type: "object"
+                          properties:
+                            date:
+                              type: "string"
+                            calendar_id:
+                              type: "string"
+                          required: ["date", "calendar_id"]
+                  tool_choice: "auto"
+                  max_tokens: 2048
+                  temperature: 0
+              saida_estruturada:
+                summary: Requisição com JSON schema
+                value:
+                  model: "gpt-4o"
+                  messages:
+                    - role: "system"
+                      content: "Analise a mensagem e retorne JSON estruturado."
+                    - role: "user"
+                      content: "Quero cancelar minha consulta, estou frustrado."
+                  response_format:
+                    type: "json_schema"
+                    json_schema:
+                      name: "response"
+                      schema:
+                        type: "object"
+                      strict: false
+                  max_tokens: 2048
+                  temperature: 0
+      responses:
+        '200':
+          description: Resposta gerada com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenAIChatResponse'
+        '401':
+          description: API key inválida ou ausente.
+        '429':
+          description: Rate limit atingido.
+        '500':
+          description: Erro interno do provedor OpenAI.
+
+  /v1beta/models/{model}:generateContent:
+    post:
+      tags:
+        - LLM Providers
+      summary: Google Gemini — Generate Content
+      description: |
+        Endpoint da API Gemini chamado pelo `GeminiAdapter` do LLMGateway.
+        URL base: `https://generativelanguage.googleapis.com`.
+        Autenticação via query parameter `?key=<GEMINI_API_KEY>`.
+
+        ### Tratamento de mensagens de sistema
+        O Gemini não suporta role `system` nativamente em todas as versões.
+        O adapter injeta mensagens de sistema como pares user/model:
+        ```
+        user: [SYSTEM]\n{system_content}\n[/SYSTEM]
+        model: Understood.
+        ```
+
+        ### Configurações de geração defaults
+        - `maxOutputTokens`: 2048
+        - `temperature`: 0
+
+        ### Ferramentas
+        Ferramentas são passadas como `functionDeclarations` dentro de `tools[0]`.
+      operationId: geminiGenerateContent
+      servers:
+        - url: https://generativelanguage.googleapis.com
+          description: Google Gemini API
+      parameters:
+        - name: model
+          in: path
+          required: true
+          description: |
+            Identificador do modelo Gemini. Exemplos:
+            - `gemini-1.5-pro`
+            - `gemini-1.5-flash`
+            - `gemini-2.0-flash-exp`
+          schema:
+            type: string
+          example: "gemini-1.5-pro"
+        - name: key
+          in: query
+          required: true
+          description: Chave de API do Google Gemini (`GEMINI_API_KEY`).
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeminiRequest'
+            examples:
+              conversa_simples:
+                summary: Conversa sem ferramentas
+                value:
+                  contents:
+                    - role: "user"
+                      parts:
+                        - text: "[SYSTEM]\nVocê é um assistente de agendamento.\n[/SYSTEM]"
+                    - role: "model"
+                      parts:
+                        - text: "Understood."
+                    - role: "user"
+                      parts:
+                        - text: "Quero agendar para amanhã às 14h."
+                  generationConfig:
+                    maxOutputTokens: 2048
+                    temperature: 0
+      responses:
+        '200':
+          description: Conteúdo gerado com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeminiResponse'
+        '400':
+          description: Requisição inválida.
+        '403':
+          description: API key inválida ou sem permissão.
+        '429':
+          description: Quota de uso excedida.
+
+# ---------------------------------------------------------------------------
+# Components
+# ---------------------------------------------------------------------------
+components:
+
+  # ---------- Security Schemes ----------
+  securitySchemes:
+    ExecutionToken:
+      type: apiKey
+      in: header
+      name: X-Execution-Token
+      description: |
+        Token de execução único gerado pela Bevox e incluído no payload de despacho
+        (`execution_token`). Válido pelo tempo de vida da execução.
+    CalendarBearer:
+      type: http
+      scheme: bearer
+      description: Token Bearer para autenticação na Calendar Service. Opcional em endpoints públicos.
+    OpenAIBearer:
+      type: http
+      scheme: bearer
+      description: OpenAI API Key (`OPENAI_API_KEY`).
+
+  # ---------- Parameters ----------
+  parameters:
+    ExecutionId:
+      name: id
+      in: path
+      required: true
+      description: UUID da execução gerado pela Bevox.
+      schema:
+        type: string
+        format: uuid
+      example: "550e8400-e29b-41d4-a716-446655440000"
+
+    CalendarId:
+      name: calendarId
+      in: path
+      required: true
+      description: Identificador único do calendário na Calendar Service.
+      schema:
+        type: string
+      example: "cal_789"
+
+    AppointmentId:
+      name: appointmentId
+      in: path
+      required: true
+      description: Identificador único do agendamento.
+      schema:
+        type: string
+      example: "apt_456"
+
+  # ---------- Responses ----------
+  responses:
+    Unauthorized:
+      description: Token de execução inválido, ausente ou expirado.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    BadRequest:
+      description: Payload inválido ou parâmetros ausentes.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    ExecutionNotFound:
+      description: Execução não encontrada com o ID fornecido.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    CalendarNotFound:
+      description: Calendário não encontrado com o ID fornecido.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    AppointmentNotFound:
+      description: Agendamento não encontrado com o ID fornecido.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------- Schemas ----------
+  schemas:
+
+    # ------------------------------------------------------------------
+    # Dispatch Payload
+    # ------------------------------------------------------------------
+
+    DispatchPayload:
+      type: object
+      additionalProperties: true
+      required:
+        - execution_id
+        - execution_token
+        - organization_id
+      description: |
+        Payload enviado pela Bevox (orchestration-service) para a fila BullMQ
+        `execution.dispatch.agent_harness`. Reflete fielmente o
+        `executionPayloadSchema` (Zod, `.passthrough()`) em
+        `src/runtime/execution-handler.ts`. Campos não declarados são
+        preservados (passthrough), por isso `additionalProperties: true`.
+
+        Limites de validação (constantes do schema): no máximo 100 mensagens
+        (`MAX_MESSAGES`), 8000 caracteres por mensagem (`MAX_MESSAGE_LENGTH`)
+        e payload total ≤ 256 KiB UTF-8 (`MAX_PAYLOAD_BYTES`). Violação →
+        o job é rejeitado na validação Zod.
+
+        Campos OPCIONAIS de acoplamento com o backend (canon APPROVED
+        bevox-knowledge #62/#63): `original_execution_id` (linhagem de
+        idempotência de replay), `max_cost_usd` (teto de custo por-execução,
+        J9) e `deadline_ms` (deadline absoluto de wall-clock, J8). Todos
+        ausentes ⇒ comportamento byte-idêntico ao legado.
+      properties:
+        execution_id:
+          type: string
+          format: uuid
+          description: Identificador único e imutável da execução (UUIDv7, _shared/ADR-016). Usado para deduplicação Redis e em todos os callbacks.
+          example: "01890b2e-7c3a-7e6f-9a21-3f8c2d4e6b10"
+        execution_token:
+          type: string
+          minLength: 20
+          maxLength: 512
+          description: Token efêmero de autenticação por execução. Enviado como `X-Execution-Token` em todos os callbacks Bevox.
+          example: "exec_tok_3f8c2d4e6b10a1b2c3d4e5f6"
+        organization_id:
+          type: string
+          format: uuid
+          description: |
+            Único identificador de tenant (ADR-019 / _shared/ADR-021). UUID.
+            Substitui o léxico legado `account_id` / `account` / `workspace_id`,
+            retirado pós ADR-019 / ADR-021.
+          example: "9b2e7c3a-4d5e-6f70-8192-a3b4c5d6e7f8"
+        execution_mode:
+          $ref: '#/components/schemas/ExecutionMode'
+        callback_base_url:
+          type: string
+          format: uri
+          description: URL base para callbacks. Quando presente, sobrepõe `BEVOX_CALLBACK_BASE_URL` da configuração do harness.
+          example: "http://bevox-backend:3000"
+        conversation:
+          type: object
+          additionalProperties: true
+          description: Metadados livres (chave-valor) da conversa de origem. Aceito como objeto opaco e preservado.
+          example:
+            id: 101
+            channel: "whatsapp"
+        messages:
+          type: array
+          description: Histórico de mensagens da conversa. Default array vazio quando ausente. Máximo 100 itens.
+          default: []
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ConversationMessage'
+        context:
+          type: object
+          description: Contexto adicional da execução em formato chave-valor livre (timezone, preferências, etc.).
+          additionalProperties: true
+          example:
+            timezone: "America/Sao_Paulo"
+            locale: "pt-BR"
+        agent_config:
+          $ref: '#/components/schemas/AgentConfig'
+        skills:
+          type: array
+          description: |
+            Allowlist plana de nomes de tool permitidos pela organização para
+            esta execução (PERM-05, modelo Layer-2). Quando NÃO vazia, qualquer
+            tool fora desta lista é negada em runtime (o harness deriva o
+            complemento vs. o registry). Quando vazia (default), nenhum filtro
+            de allowlist é aplicado. Máximo 50 itens.
+            Ver `src/permissions/permission-context.ts:deriveAccountDeniedTools`.
+          default: []
+          maxItems: 50
+          items:
+            type: string
+          example:
+            - "create-appointment"
+            - "read-calendar"
+            - "send-message"
+        account_denied_tools:
+          type: array
+          description: |
+            Blacklist autoritativa de nomes de tool (PERM-05). Tools listadas
+            aqui são SEMPRE negadas em Layer-2 (`EXECUTION_CONTEXT_DENIED`),
+            independente de qualquer allowlist. Unida ao complemento derivado de
+            `skills` no conjunto final de denied. Default vazio. Máximo 200 itens.
+          default: []
+          maxItems: 200
+          items:
+            type: string
+          example:
+            - "cancel-appointment"
+        stream:
+          type: boolean
+          description: |
+            Opt-in por execução para streaming de resposta (Sprint C.2).
+            Efetivo apenas quando `STREAM_ENABLED=true` também no harness
+            (AND global + por-execução). Default `false`.
+          default: false
+        original_execution_id:
+          type: string
+          format: uuid
+          description: |
+            Linhagem de idempotência (canon APPROVED — bevox-knowledge #62/#63).
+            Campo OPCIONAL de entrada: o `execution_id` RAIZ de uma linhagem de
+            replay. Um replay de staff chega com um NOVO `execution_id` mas o
+            MESMO `original_execution_id` (o backend encadeia todo replay à raiz).
+            Quando presente, `MutationTool.deriveIdempotencyKey` o usa como o
+            componente `execution_id` do hash, de modo que um replay deriva a
+            MESMA `Idempotency-Key` da execução original → o backend de-duplica
+            → SEM mutação duplicada. Ausente (default) → comportamento
+            byte-idêntico ao atual (chave usa `execution_id`).
+          example: "01890b2e-7c3a-7e6f-9a21-3f8c2d4e6b10"
+        max_cost_usd:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000
+          description: |
+            Teto de custo por-execução em USD (J9, runtime-gap), enviado pelo
+            bevox-backend quando a org/plano impõe limite. OPCIONAL: quando
+            ausente, cai no default env `HARNESS_MAX_COST_USD` (ou sem teto se
+            env=0). Positivo e ≤ 1000 USD (sanidade). Use a AUSÊNCIA (não `0`
+            explícito) para "sem teto". Resolvido em centavos e usado pelo gate
+            de custo no topo de cada step do surface loop.
+          example: 0.50
+        deadline_ms:
+          type: integer
+          exclusiveMinimum: 0
+          description: |
+            Deadline ABSOLUTO de wall-clock em epoch milissegundos (J8,
+            backend-coupling, canon APPROVED #62/#63), ancorado no RELÓGIO DO
+            BACKEND (DB). Quando presente e positivo, o harness PREFERE este
+            valor ao deadline derivado localmente
+            (`devStartTs + maxExecutionTimeMs`), fechando o skew de fila + clock
+            entre producer e worker. Um retry tardio nascido com `deadline_ms`
+            JÁ NO PASSADO faz o gate cooperativo de deadline disparar de
+            imediato → terminal `aborted_timeout`. OPCIONAL: ausente/inválido ⇒
+            fallback byte-idêntico ao comportamento atual.
+          example: 1780000000000
+
+    # ------------------------------------------------------------------
+    # Execution Mode (ADR-006)
+    # ------------------------------------------------------------------
+
+    ExecutionMode:
+      type: string
+      description: |
+        Modo de autonomia da IA (ADR-006). Propagado até
+        `ToolContext.execution_mode` e consumido por
+        `MutationTool.executeOrPropose`:
+        - `manual_assisted` — IA sugere; humano aprova. Tools de mutação retornam proposal (sem efeito).
+        - `copilot` — IA estrutura conhecimento; tools de mutação retornam proposal (sem efeito).
+        - `autonomous_supervised` — IA executa dentro de regras aprovadas; escala exceções.
+        Opcional no payload; default conservador `autonomous_supervised`.
+      enum:
+        - manual_assisted
+        - copilot
+        - autonomous_supervised
+      default: autonomous_supervised
+      example: "autonomous_supervised"
+
+    # ------------------------------------------------------------------
+    # Agent Config
+    # ------------------------------------------------------------------
+
+    AgentConfig:
+      type: object
+      description: |
+        Configuração de comportamento do agente extraída de `agent_config` no
+        payload. Campo opcional; campos adicionais são permitidos (passthrough).
+      properties:
+        default_model:
+          type: string
+          maxLength: 64
+          description: |
+            Modelo LLM. Aceita nome simples (ex: `"gpt-4o-mini"`) ou no formato
+            `"provider/model"`. Quando há prefixo de provider, ele deve estar na
+            allowlist `openai | gemini | anthropic` e o nome deve casar com o
+            charset/comprimento permitidos (validação Zod `isValidModelString`).
+          example: "openai/gpt-4o"
+        system_prompt:
+          type: string
+          description: Instrução de sistema injetada no início do input do surface agent.
+          example: "Você é um assistente de agendamento especializado em clínicas de saúde."
+      additionalProperties: true
+
+    # ------------------------------------------------------------------
+    # Conversation Message
+    # ------------------------------------------------------------------
+
+    ConversationMessage:
+      type: object
+      required:
+        - role
+        - content
+      description: Mensagem individual do histórico de conversa entre usuário e assistente.
+      properties:
+        role:
+          type: string
+          enum:
+            - user
+            - assistant
+            - system
+          description: |
+            Papel do remetente da mensagem:
+            - `user` — mensagem do usuário final
+            - `assistant` — resposta gerada pelo agente
+            - `system` — instrução de sistema (incomum no histórico)
+          example: "user"
+        content:
+          type: string
+          description: Conteúdo textual completo da mensagem.
+          example: "Quero agendar uma consulta para amanhã às 14h"
+
+    # ------------------------------------------------------------------
+    # Trace Entry
+    # ------------------------------------------------------------------
+
+    TraceEntry:
+      type: object
+      required:
+        - step
+        - type
+        - content
+        - timestamp
+      description: Registro de um passo intermediário do processo de raciocínio do agente.
+      properties:
+        step:
+          type: integer
+          minimum: 0
+          description: Índice do passo de raciocínio (base 0).
+          example: 0
+        type:
+          type: string
+          enum:
+            - thought
+            - action
+            - observation
+          description: |
+            Tipo do trace:
+            - `thought` — cadeia de raciocínio interna do agente (ReAct)
+            - `action` — chamada de ferramenta disparada
+            - `observation` — resumo do resultado após execução da ferramenta
+          example: "observation"
+        content:
+          type: string
+          description: Conteúdo textual do trace (resumo do `observation.summary` ou texto de raciocínio).
+          example: "Encontrei 3 horários disponíveis para amanhã: 9h, 14h e 16h."
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento exato em que o trace foi gerado (UTC, formato ISO 8601).
+          example: "2026-04-05T10:30:00.000Z"
+
+    # ------------------------------------------------------------------
+    # Stream Chunk
+    # ------------------------------------------------------------------
+
+    StreamChunk:
+      type: object
+      required:
+        - chunk
+        - index
+      description: Fragmento de resposta enviado em tempo real durante a geração da resposta final.
+      properties:
+        chunk:
+          type: string
+          description: Fragmento de texto da resposta.
+          example: "Encontrei o seguinte horário disponível para você: "
+        index:
+          type: integer
+          minimum: 0
+          description: Índice sequencial do chunk (base 0). Permite reordenação e detecção de gaps.
+          example: 0
+
+    # ------------------------------------------------------------------
+    # Complete Payload
+    # ------------------------------------------------------------------
+
+    CompletePayload:
+      type: object
+      required:
+        - response_text
+        - sentiment
+        - strategy
+        - usage
+      description: |
+        Payload enviado ao endpoint `/complete` ao término da execução.
+        Presente tanto em execuções bem-sucedidas quanto em falhas
+        (com `response_text: ""` e `strategy: "failed"`).
+
+        Os 4 campos são **obrigatórios** — sua ausência → HTTP 400 no
+        `CompleteCallbackSchema` do backend. O harness usa o helper
+        `buildCompletePayload` (`src/integration/bevox-callback.ts`) que
+        sempre preenche defaults seguros (`sentiment: "neutral"`,
+        `strategy: "direct"`, `usage: {0, 0}`). `proposals` é incluído
+        apenas quando não vazio.
+      properties:
+        response_text:
+          type: string
+          description: |
+            Resposta final sintetizada para o usuário. String vazia quando
+            a execução foi escalada para humano ou falhou. (Campo originalmente
+            chamado `response`; renomeado para `response_text` — nome obrigatório
+            no schema Zod do backend.)
+          example: "Seu agendamento foi confirmado para amanhã, 06/04, às 14h00 com Dr. Silva."
+        sentiment:
+          type: string
+          description: |
+            Sentimento detectado pelo `MessageAnalyzerAgent` na mensagem do usuário.
+            Default `neutral` quando o pipeline não computou um.
+          enum:
+            - positive
+            - negative
+            - neutral
+          example: "positive"
+        strategy:
+          type: string
+          description: |
+            Estratégia de raciocínio utilizada (ou motivo de não-execução):
+            - `direct` — resposta direta sem uso de ferramentas (também o default do helper)
+            - `react` — loop ReAct (thought → action → observation)
+            - `plan-execute` — planejamento seguido de execução sequencial de steps
+            - `rewoo` — planejamento com execução paralela e dependências entre steps
+            - `request-human` — escalado para atendente humano (sem tools)
+            - `failed` — falha não recuperável; `response_text` estará vazia
+          enum:
+            - direct
+            - react
+            - plan-execute
+            - rewoo
+            - request-human
+            - failed
+          example: "react"
+        usage:
+          type: object
+          required:
+            - prompt_tokens
+            - completion_tokens
+          description: Contagem de tokens consumidos na execução. Obrigatório; default `{0, 0}` quando o tracker não acumulou.
+          properties:
+            prompt_tokens:
+              type: integer
+              minimum: 0
+              description: Tokens de entrada consumidos.
+              example: 0
+            completion_tokens:
+              type: integer
+              minimum: 0
+              description: Tokens de saída gerados.
+              example: 0
+        proposals:
+          type: array
+          description: |
+            Proposals de mutação acumulados nos modos não-autônomos
+            (`manual_assisted` / `copilot`), hoisted via `extractProposal`.
+            Omitido quando vazio. Cada item descreve a ação proposta e seus
+            parâmetros, sem efeito externo até aprovação humana (EM-03).
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              action:
+                type: string
+                description: Nome da tool de mutação proposta.
+                example: "create-appointment"
+              params:
+                type: object
+                additionalProperties: true
+                description: Parâmetros que seriam aplicados se a proposta fosse aprovada.
+
+    # ------------------------------------------------------------------
+    # Tool Definition
+    # ------------------------------------------------------------------
+
+    ToolDefinition:
+      type: object
+      required:
+        - name
+        - description
+        - category
+        - agentType
+        - parameters
+      description: |
+        Definição de uma ferramenta disponível no `ToolRegistry` do harness.
+        Ferramentas são filtradas por permissões do agente antes de serem
+        passadas ao reasoning engine.
+      properties:
+        name:
+          type: string
+          description: Identificador único da ferramenta (snake_case).
+          example: "check_availability"
+        description:
+          type: string
+          description: Descrição em linguagem natural da função da ferramenta, usada pelo LLM para seleção.
+          example: "Verifica horários disponíveis em um calendário para uma data específica."
+        category:
+          type: string
+          enum:
+            - calendar
+            - messaging
+            - memory
+            - knowledge
+          description: Categoria funcional da ferramenta. Usada para filtragem por skills habilitadas.
+          example: "calendar"
+        agentType:
+          type: string
+          enum:
+            - pipeline
+            - surface
+            - both
+          description: |
+            Tipo de agente que pode usar a ferramenta:
+            - `pipeline` — apenas agentes de pipeline (MessageAnalyzer, MemoryExtractor)
+            - `surface` — apenas surface agents (Scheduler, etc.)
+            - `both` — disponível para ambos os tipos
+          example: "surface"
+        parameters:
+          type: object
+          description: |
+            JSON Schema dos parâmetros de entrada da ferramenta.
+            Enviado diretamente ao LLM como schema de função.
+          additionalProperties: true
+          example:
+            type: "object"
+            properties:
+              date:
+                type: "string"
+                description: "Data no formato YYYY-MM-DD"
+              calendar_id:
+                type: "string"
+                description: "ID do calendário"
+            required:
+              - "date"
+              - "calendar_id"
+
+    # ------------------------------------------------------------------
+    # Agent Definition
+    # ------------------------------------------------------------------
+
+    AgentDefinition:
+      type: object
+      required:
+        - name
+        - type
+        - description
+        - reasoning
+        - permissions
+      description: |
+        Definição de um agente registrado no `AgentRegistry` do harness.
+        Define o tipo, capacidades de raciocínio e permissões de ferramentas.
+      properties:
+        name:
+          type: string
+          description: Identificador único do agente (kebab-case).
+          example: "scheduler"
+        type:
+          type: string
+          enum:
+            - pipeline
+            - surface
+          description: |
+            Tipo do agente:
+            - `pipeline` — executa tarefas internas de análise (ex: message-analyzer, memory-extractor)
+            - `surface` — interage com o usuário e usa ferramentas externas (ex: scheduler)
+          example: "surface"
+        description:
+          type: string
+          description: Descrição funcional do agente.
+          example: "Agente responsável por criar, cancelar e remarcar agendamentos."
+        reasoning:
+          $ref: '#/components/schemas/ReasoningConfig'
+        permissions:
+          type: object
+          required:
+            - required
+            - denied
+          description: Configuração de permissões de acesso a ferramentas.
+          properties:
+            required:
+              type: array
+              description: Ferramentas obrigatórias para o agente funcionar.
+              items:
+                type: string
+              example:
+                - "check_availability"
+                - "create_appointment"
+            optional:
+              type: array
+              description: Ferramentas opcionais — o agente funciona sem elas.
+              items:
+                type: string
+              example:
+                - "add_to_waitlist"
+            denied:
+              type: array
+              description: Ferramentas explicitamente proibidas para este agente.
+              items:
+                type: string
+              example: []
+
+    # ------------------------------------------------------------------
+    # Reasoning Config
+    # ------------------------------------------------------------------
+
+    ReasoningConfig:
+      type: object
+      required:
+        - default
+      description: |
+        Configuração da estratégia de raciocínio do agente e regras de escalação.
+        A estratégia inicial é definida por `default`; o `StepEvaluator` pode
+        escalar para estratégias mais robustas conforme o número de passos cresce.
+      properties:
+        default:
+          type: string
+          enum:
+            - direct
+            - react
+            - plan-execute
+            - rewoo
+          description: |
+            Estratégia de raciocínio inicial:
+            - `direct` — LLM responde diretamente sem planejamento
+            - `react` — loop Thought → Action → Observation
+            - `plan-execute` — gera plano completo e executa sequencialmente
+            - `rewoo` — planejamento com execução paralela e dependências
+          example: "react"
+        escalation:
+          type: object
+          description: Regras para escalação automática de estratégia durante a execução.
+          properties:
+            stepThreshold:
+              type: integer
+              minimum: 1
+              description: Número de passos após o qual o `StepEvaluator` considera escalação. Default 5.
+              example: 5
+            escalateTo:
+              type: string
+              enum:
+                - plan-execute
+                - rewoo
+              description: Estratégia alvo da escalação. Default `plan-execute`.
+              example: "plan-execute"
+            parallelThreshold:
+              type: integer
+              minimum: 1
+              description: Número de passos paralelos que dispara escalação para ReWOO. Default 2.
+              example: 2
+            onFailure:
+              type: string
+              enum:
+                - reflexion
+                - abort
+              description: |
+                Comportamento em caso de falha de passo:
+                - `reflexion` — envolve o engine atual com `ReflexionWrapper` para auto-crítica
+                - `abort` — interrompe a execução (default)
+              example: "reflexion"
+
+    # ------------------------------------------------------------------
+    # Calendar / Appointment Schemas
+    # ------------------------------------------------------------------
+
+    AvailabilityResponse:
+      type: object
+      description: Resposta de consulta de disponibilidade da Calendar Service.
+      properties:
+        date:
+          type: string
+          format: date
+          description: Data consultada (YYYY-MM-DD).
+          example: "2026-04-06"
+        calendar_id:
+          type: string
+          description: ID do calendário consultado.
+          example: "cal_789"
+        slots:
+          type: array
+          description: Lista de slots de horário com indicação de disponibilidade.
+          items:
+            type: object
+            properties:
+              start_time:
+                type: string
+                description: Horário de início do slot (HH:MM).
+                example: "14:00"
+              end_time:
+                type: string
+                description: Horário de fim do slot (HH:MM).
+                example: "14:30"
+              available:
+                type: boolean
+                description: Indica se o slot está disponível para agendamento.
+                example: true
+
+    AppointmentRequest:
+      type: object
+      description: Payload para criação de novo agendamento.
+      properties:
+        service_id:
+          type: string
+          description: Identificador do tipo de serviço a ser agendado.
+          example: "consulta-30min"
+        date:
+          type: string
+          format: date
+          description: Data do agendamento (YYYY-MM-DD).
+          example: "2026-04-06"
+        start_time:
+          type: string
+          description: Horário de início (HH:MM).
+          example: "14:00"
+        customer:
+          type: object
+          description: Dados de identificação do cliente.
+          properties:
+            name:
+              type: string
+              example: "Maria Silva"
+            phone:
+              type: string
+              example: "+5511999999999"
+            email:
+              type: string
+              format: email
+              example: "maria@email.com"
+        notes:
+          type: string
+          description: Observações adicionais para o agendamento.
+          example: "Primeira consulta"
+      additionalProperties: true
+
+    Appointment:
+      type: object
+      description: Representação de um agendamento retornado pela Calendar Service.
+      properties:
+        id:
+          type: string
+          description: Identificador único do agendamento.
+          example: "apt_456"
+        calendar_id:
+          type: string
+          description: ID do calendário ao qual o agendamento pertence.
+          example: "cal_789"
+        service_id:
+          type: string
+          description: Tipo de serviço agendado.
+          example: "consulta-30min"
+        date:
+          type: string
+          format: date
+          description: Data do agendamento.
+          example: "2026-04-06"
+        start_time:
+          type: string
+          description: Horário de início.
+          example: "14:00"
+        end_time:
+          type: string
+          description: Horário de fim.
+          example: "14:30"
+        status:
+          type: string
+          description: Status atual do agendamento.
+          enum:
+            - scheduled
+            - cancelled
+            - completed
+            - rescheduled
+          example: "scheduled"
+        customer:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-05T10:30:00.000Z"
+      additionalProperties: true
+
+    WaitlistRequest:
+      type: object
+      description: Payload para inserção na lista de espera.
+      properties:
+        service_id:
+          type: string
+          description: Serviço desejado pelo cliente.
+          example: "consulta-30min"
+        preferred_dates:
+          type: array
+          description: Datas preferidas pelo cliente (YYYY-MM-DD).
+          items:
+            type: string
+            format: date
+          example:
+            - "2026-04-06"
+            - "2026-04-07"
+        preferred_times:
+          type: array
+          description: Períodos preferidos (morning, afternoon, evening).
+          items:
+            type: string
+          example:
+            - "morning"
+            - "afternoon"
+        customer:
+          type: object
+          description: Dados de contato do cliente.
+          additionalProperties: true
+      additionalProperties: true
+
+    # ------------------------------------------------------------------
+    # OpenAI Schemas
+    # ------------------------------------------------------------------
+
+    OpenAIChatRequest:
+      type: object
+      required:
+        - model
+        - messages
+      description: Requisição para a API Chat Completions da OpenAI, conforme montada pelo `OpenAIAdapter`.
+      properties:
+        model:
+          type: string
+          description: Identificador do modelo OpenAI.
+          example: "gpt-4o"
+        messages:
+          type: array
+          description: Histórico de mensagens no formato OpenAI.
+          items:
+            type: object
+            required:
+              - role
+              - content
+            properties:
+              role:
+                type: string
+                enum:
+                  - system
+                  - user
+                  - assistant
+                  - tool
+              content:
+                type:
+                  - string
+                  - "null"
+              tool_call_id:
+                type: string
+                description: ID da tool call sendo respondida (apenas para role=tool).
+              name:
+                type: string
+                description: Nome da ferramenta (apenas para role=tool).
+              tool_calls:
+                type: array
+                description: Chamadas de ferramenta do assistente (apenas para role=assistant).
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    type:
+                      type: string
+                      enum:
+                        - function
+                    function:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        arguments:
+                          type: string
+        max_tokens:
+          type: integer
+          description: Máximo de tokens na resposta. Default do harness é 2048.
+          default: 2048
+          example: 2048
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          description: Temperatura de amostragem. Default do harness é 0 (determinístico).
+          default: 0
+          example: 0
+        tools:
+          type: array
+          description: |
+            Ferramentas disponíveis para o modelo chamar. Mutuamente exclusivo com `response_format`.
+            Quando presente, `tool_choice` é automaticamente definido como `"auto"`.
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum:
+                  - function
+              function:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  description:
+                    type: string
+                  parameters:
+                    type: object
+                    additionalProperties: true
+        tool_choice:
+          type: string
+          description: Estratégia de seleção de ferramenta. O harness usa `"auto"`.
+          example: "auto"
+        response_format:
+          type: object
+          description: |
+            Formato de saída estruturada. Mutuamente exclusivo com `tools`.
+            O harness usa `type: "json_schema"` com `strict: false`.
+          properties:
+            type:
+              type: string
+              enum:
+                - json_schema
+            json_schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                schema:
+                  type: object
+                  additionalProperties: true
+                strict:
+                  type: boolean
+
+    OpenAIChatResponse:
+      type: object
+      description: Resposta da API Chat Completions da OpenAI.
+      properties:
+        id:
+          type: string
+          example: "chatcmpl-abc123"
+        model:
+          type: string
+          example: "gpt-4o-2024-08-06"
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              message:
+                type: object
+                properties:
+                  role:
+                    type: string
+                  content:
+                    type:
+                      - string
+                      - "null"
+                  tool_calls:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        type:
+                          type: string
+                        function:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                            arguments:
+                              type: string
+              finish_reason:
+                type: string
+                enum:
+                  - stop
+                  - tool_calls
+                  - length
+                  - content_filter
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            completion_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+
+    # ------------------------------------------------------------------
+    # Gemini Schemas
+    # ------------------------------------------------------------------
+
+    GeminiRequest:
+      type: object
+      required:
+        - contents
+      description: |
+        Requisição para a API Gemini, conforme montada pelo `GeminiAdapter`.
+        Mensagens de sistema são convertidas em pares user/model antes do envio.
+      properties:
+        contents:
+          type: array
+          description: Histórico de mensagens no formato Gemini (role user/model).
+          items:
+            type: object
+            required:
+              - role
+              - parts
+            properties:
+              role:
+                type: string
+                enum:
+                  - user
+                  - model
+                description: |
+                  Papel do remetente. `assistant` é mapeado para `model`.
+                  Mensagens `system` são convertidas em pares user/model pelo adapter.
+              parts:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    text:
+                      type: string
+        generationConfig:
+          type: object
+          description: Configurações de geração de conteúdo.
+          properties:
+            maxOutputTokens:
+              type: integer
+              description: Máximo de tokens na resposta. Default do harness é 2048.
+              default: 2048
+              example: 2048
+            temperature:
+              type: number
+              minimum: 0
+              description: Temperatura de amostragem. Default do harness é 0.
+              default: 0
+              example: 0
+            responseMimeType:
+              type: string
+              description: Tipo MIME da resposta. Definido como `"application/json"` quando `responseSchema` está presente.
+              example: "application/json"
+            responseSchema:
+              type: object
+              description: JSON Schema para saída estruturada. Mutuamente exclusivo com `tools`.
+              additionalProperties: true
+        tools:
+          type: array
+          description: Ferramentas disponíveis para o modelo. Mutuamente exclusivo com `responseSchema`.
+          items:
+            type: object
+            properties:
+              functionDeclarations:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    description:
+                      type: string
+                    parameters:
+                      type: object
+                      additionalProperties: true
+
+    GeminiResponse:
+      type: object
+      description: Resposta da API Gemini.
+      properties:
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              content:
+                type: object
+                properties:
+                  role:
+                    type: string
+                  parts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        text:
+                          type: string
+                          description: Conteúdo textual (presente em respostas de texto).
+                        functionCall:
+                          type: object
+                          description: Chamada de função (presente em respostas com tools).
+                          properties:
+                            name:
+                              type: string
+                            args:
+                              type: object
+                              additionalProperties: true
+              finishReason:
+                type: string
+                enum:
+                  - STOP
+                  - MAX_TOKENS
+                  - SAFETY
+                  - RECITATION
+                  - OTHER
+        usageMetadata:
+          type: object
+          description: Metadados de uso de tokens.
+          properties:
+            promptTokenCount:
+              type: integer
+              description: Tokens de entrada consumidos.
+            candidatesTokenCount:
+              type: integer
+              description: Tokens de saída gerados.
+            totalTokenCount:
+              type: integer
+              description: Total de tokens consumidos.
+
+    # ------------------------------------------------------------------
+    # Error Response
+    # ------------------------------------------------------------------
+
+    ErrorResponse:
+      type: object
+      description: Formato padrão de resposta de erro.
+      properties:
+        error:
+          type: string
+          description: Código de erro legível por máquina.
+          example: "EXECUTION_NOT_FOUND"
+        message:
+          type: string
+          description: Descrição legível do erro.
+          example: "Execução com o ID fornecido não foi encontrada."
+        details:
+          type: object
+          description: Informações adicionais de diagnóstico (quando disponíveis).
+          additionalProperties: true

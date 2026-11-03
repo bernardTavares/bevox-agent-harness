@@ -1,0 +1,15 @@
+name: read-profile
+version: 1.0.0
+description: Read the contact profile (fixed fields and known facts) for a contact.
+category: memory
+agentType: both
+parameters:
+  type: object
+  required: [contact_id]
+  properties:
+    contact_id:
+      type: number
+permissions:
+  requires: []
+  sideEffects: [read]
+entry: index

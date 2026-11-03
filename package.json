@@ -1,0 +1,111 @@
+{
+  "name": "bevox-agent-harness",
+  "version": "0.1.0",
+  "license": "FSL-1.1-MIT",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "playground"
+  ],
+  "bin": {
+    "bevox-mcp": "./dist/bin/bevox-mcp.js"
+  },
+  "files": [
+    "dist/",
+    "src/skills-builtin/"
+  ],
+  "scripts": {
+    "build": "tsc && node scripts/copy-skill-manifests.mjs",
+    "dev": "tsx watch src/index.ts",
+    "playground": "concurrently -k -n harness,ui -c blue,magenta \"cross-env HARNESS_DEV_MODE=1 npm run dev\" \"npm -w @bevox-harness/playground run dev\"",
+    "playground:ui": "npm -w @bevox-harness/playground run dev",
+    "playground:harness": "cross-env HARNESS_DEV_MODE=1 npm run dev",
+    "start": "node dist/index.js",
+    "mcp:dev": "tsx src/bin/bevox-mcp.ts --transport stdio",
+    "mcp:sse": "tsx src/bin/bevox-mcp.ts --transport sse",
+    "lint": "eslint \"src/**/*.ts\"",
+    "lint:fix": "eslint --fix \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.{ts,js,json}\" \"*.{md,json,yml,yaml}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,js,json}\" \"*.{md,json,yml,yaml}\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration --testTimeout=60000",
+    "test:coverage": "vitest run --coverage",
+    "prepare": "husky",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "changeset tag",
+    "docker:up": "node scripts/dev-up.mjs",
+    "docker:down": "node scripts/dev-down.mjs",
+    "docker:logs": "docker compose logs -f harness",
+    "db:migrate": "node scripts/migrate.mjs",
+    "smoke:enqueue": "node scripts/enqueue-test-job.mjs",
+    "eval:golden": "tsx scripts/eval-golden.ts",
+    "rag:ingest": "tsx src/rag/cli/ingest.ts",
+    "rag:ingest:sdr-kb": "tsx src/rag/cli/ingest.ts --source tests/fixtures/sdr/kb --tag sdr-icp",
+    "rag:reembed": "tsx src/rag/cli/reembed.ts",
+    "worker:condense": "tsx src/workers/condense-worker.ts"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/auto-instrumentations-node": "^0.76.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
+    "@opentelemetry/resources": "^2.7.1",
+    "@opentelemetry/sdk-node": "^0.218.0",
+    "@opentelemetry/semantic-conventions": "^1.41.1",
+    "ajv": "^8.20.0",
+    "bullmq": "^5.58.5",
+    "dotenv": "^16.6.1",
+    "ioredis": "^5.8.1",
+    "js-tiktoken": "^1.0.21",
+    "js-yaml": "^4.1.1",
+    "micromatch": "^4.0.8",
+    "p-timeout": "^6.1.4",
+    "pg": "^8.16.3",
+    "pino": "^9.9.4",
+    "ws": "^8.20.1",
+    "zod": "^4.1.11",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.0",
+    "@commitlint/cli": "19.8.1",
+    "@commitlint/config-conventional": "19.8.1",
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
+    "@testcontainers/postgresql": "^11.14.0",
+    "@testcontainers/redis": "^11.14.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/micromatch": "^4.0.10",
+    "@types/node": "^24.12.0",
+    "@types/pg": "^8.15.5",
+    "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^4.1.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^7.0.3",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^9.1.2",
+    "eslint-plugin-import": "^2.32.0",
+    "husky": "^9.1.7",
+    "ioredis-mock": "^8.13.1",
+    "lint-staged": "^15.5.2",
+    "prettier": "3.8.3",
+    "testcontainers": "^11.14.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.59.3",
+    "vitest": "^4.1.0"
+  }
+}

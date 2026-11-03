@@ -1,0 +1,8 @@
+dist/
+coverage/
+node_modules/
+*.lock
+*.log
+.husky/_/
+playground/
+

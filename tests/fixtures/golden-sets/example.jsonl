@@ -1,0 +1,4 @@
+{"id": "case-001", "input": "Quero marcar consulta amanha 14h", "output": "Claro, vou agendar consulta amanha as 14h. Confirma?"}
+{"id": "case-002", "input": "Qual o horario do consultorio?", "output": "Funcionamos de segunda a sexta, das 8h as 18h.", "context": {"knowledge": ["Horario: seg-sex 8h-18h"]}}
+{"id": "case-003", "input": "Preciso cancelar minha consulta", "output": "Sem problema, vou cancelar. Qual o numero da consulta?"}
+{"id": "case-004", "input": "Bom dia", "output": "Bom dia! Como posso ajudar?"}

@@ -1,0 +1,14 @@
+node_modules
+dist
+coverage
+.git
+.env
+.env.*
+!.env.example
+*.log
+.husky/_
+.github
+docs
+tests
+.changeset
+.claude

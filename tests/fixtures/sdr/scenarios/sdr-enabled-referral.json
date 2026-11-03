@@ -1,0 +1,35 @@
+{
+  "id": "sdr-enabled-referral",
+  "description": "SDR profile enabled: agent sends a referral-ask message (single CTA, no forbidden phrases) to a mid-market prospect experiencing tech-stack pain.",
+  "agent_config": {
+    "system_prompt": "You are a B2B SDR focused on mid-market SaaS companies. Research before reaching out.",
+    "sdr_profile": {
+      "enabled": true,
+      "qualification_framework": "PACT"
+    }
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "We're a Head of Engineering at TechFlow. Our CI/CD pipeline is broken — builds fail unpredictably and the team can't ship reliably. It's costing us weeks of delays every quarter."
+    }
+  ],
+  "llm_responses": [
+    {
+      "content": "{\"thinking\":\"Head of Engineering with explicit tech pain around CI/CD reliability and delivery delays. Single referral-ask CTA — no qualification claim.\",\"text\":\"TechFlow's engineering challenges around CI/CD reliability and unpredictable build failures are exactly the kind of bottleneck that delays shipping cycles and frustrates engineering leaders. Teams in high-growth environments often find these issues compound quickly as the codebase scales. Could you point me to who owns the tooling decisions for your build pipeline?\"}",
+      "tool_calls": [],
+      "usage": { "input_tokens": 45, "output_tokens": 75, "total_tokens": 120 },
+      "model": "fake-model",
+      "provider": "fake",
+      "latency_ms": 10
+    }
+  ],
+  "judge_response": {
+    "content": "{\"score\":0.80,\"reasoning\":\"The response names the Head of Engineering persona and articulates CI/CD reliability and delivery delays as explicit buyer pains. Two prospect-world dimensions are grounded in the account context.\"}",
+    "tool_calls": [],
+    "usage": { "input_tokens": 20, "output_tokens": 40, "total_tokens": 60 },
+    "model": "fake-judge",
+    "provider": "fake",
+    "latency_ms": 5
+  }
+}

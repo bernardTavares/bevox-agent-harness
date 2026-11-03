@@ -1,0 +1,29 @@
+name: create-appointment
+version: 1.0.0
+description: Create a new appointment in the calendar.
+category: calendar
+agentType: surface
+parameters:
+  type: object
+  required: [calendar_id, service_id, customer_name, date, start_time]
+  properties:
+    calendar_id:
+      type: string
+    service_id:
+      type: string
+    member_id:
+      type: string
+    customer_name:
+      type: string
+    customer_phone:
+      type: string
+    date:
+      type: string
+      description: ISO date
+    start_time:
+      type: string
+      description: HH:MM
+permissions:
+  requires: []
+  sideEffects: [write, external_call]
+entry: index

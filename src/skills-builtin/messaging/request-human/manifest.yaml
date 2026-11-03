@@ -1,0 +1,19 @@
+name: request-human
+version: 1.0.0
+description: Transfer the conversation to a human agent. STOP signal — the reasoning loop halts after this is called.
+category: messaging
+agentType: surface
+parameters:
+  type: object
+  required: [reason]
+  properties:
+    reason:
+      type: string
+      description: Why the transfer is needed
+    team_id:
+      type: number
+      description: Optional target team ID
+permissions:
+  requires: []
+  sideEffects: [external_call, stop_signal]
+entry: index

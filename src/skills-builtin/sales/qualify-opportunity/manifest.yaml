@@ -1,0 +1,96 @@
+name: qualify-opportunity
+version: 1.0.0
+description: >
+  Score a sales opportunity using the PACT rubric (Pain, Authority, Consequence,
+  Target Profile). Requires observable evidence for each dimension — never
+  self-report alone. Returns a qualified verdict only when both Pain and Authority
+  evidence are present and the total score meets the pass gate (≥3/4). Pure
+  compute — no DB, HTTP, or file I/O.
+category: sales
+agentType: surface
+parameters:
+  type: object
+  properties:
+    pain:
+      type: object
+      nullable: true
+      description: >
+        Evidence of specific, consequential business pain stated by the prospect
+        in their own words (not inferred by the SDR).
+      properties:
+        description:
+          type: string
+          description: Verbatim or paraphrased pain statement from the prospect.
+        evidenceType:
+          type: string
+          enum: [prospect_stated, third_party_confirmed]
+          description: How the pain was surfaced.
+    authority:
+      type: object
+      nullable: true
+      description: >
+        Evidence that the contact is an economic buyer or a confirmed champion
+        who has named and committed to engage the economic buyer.
+      properties:
+        description:
+          type: string
+          description: Evidence text describing the authority relationship.
+        evidenceType:
+          type: string
+          enum: [economic_buyer, named_decision_maker, internal_meeting_set]
+          description: Category of authority evidence.
+    consequence:
+      type: object
+      nullable: true
+      description: >
+        Documented cost of inaction — quantified impact or strategic consequence
+        stated by the prospect or confirmed from verifiable external data.
+      properties:
+        description:
+          type: string
+          description: Consequence statement, ideally quantified.
+        evidenceType:
+          type: string
+          enum: [quantified_impact, strategic_consequence]
+          description: Type of consequence evidence.
+    targetProfile:
+      type: object
+      nullable: true
+      description: >
+        Firmographic and persona match against ICP. Satisfies T when icpMatchCount ≥ 4
+        of 6 ICP dimensions and personaMatch is true.
+      properties:
+        icpMatchCount:
+          type: number
+          description: Number of ICP dimensions (out of 6) that match.
+        personaMatch:
+          type: boolean
+          description: Whether the contact title/responsibilities match the target persona.
+        notes:
+          type: string
+          description: Optional supporting notes.
+    framework:
+      type: string
+      enum: [PACT, PACT2]
+      default: PACT
+      description: >
+        Qualification framework variant. PACT2 adds Timing (Ti) and requires
+        ≥4/5 with P, A, and Ti all satisfied. Default is PACT.
+    timing:
+      type: object
+      nullable: true
+      description: >
+        PACT2 only — concrete externally verifiable event or deadline creating
+        urgency. Required when framework=PACT2.
+      properties:
+        description:
+          type: string
+          description: Named event or fiscal deadline stated by the prospect.
+        evidenceType:
+          type: string
+          enum: [named_event, fiscal_deadline]
+          description: Type of timing evidence.
+permissions:
+  requires: []
+  sideEffects: []
+entry: index

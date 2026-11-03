@@ -1,0 +1,16 @@
+name: send-message
+version: 1.0.0
+description: Send a response message to the customer. STOP signal — the reasoning loop halts after this is called.
+category: messaging
+agentType: surface
+parameters:
+  type: object
+  required: [message]
+  properties:
+    message:
+      type: string
+      description: The text to send to the customer
+permissions:
+  requires: []
+  sideEffects: [external_call, stop_signal]
+entry: index

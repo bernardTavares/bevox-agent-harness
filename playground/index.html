@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bevox Harness Playground</title>
+    <style>
+      :root {
+        color-scheme: dark light;
+        --bg: #0b0f17;
+        --panel: #131927;
+        --panel-2: #1a2233;
+        --border: #2a3346;
+        --text: #e6ecf5;
+        --text-dim: #8a93a6;
+        --accent: #6ea8fe;
+        --ok: #4ade80;
+        --warn: #fbbf24;
+        --err: #f87171;
+        --pipeline: #60a5fa;
+        --surface: #4ade80;
+        --tool: #fb923c;
+        --llm: #c084fc;
+      }
+      html.light {
+        --bg: #f7f8fa;
+        --panel: #ffffff;
+        --panel-2: #f0f2f6;
+        --border: #d6dae2;
+        --text: #1a202c;
+        --text-dim: #5a6478;
+      }
+      * { box-sizing: border-box; }
+      html, body, #root { height: 100%; margin: 0; }
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 13px;
+      }
+      button {
+        cursor: pointer;
+        background: var(--panel-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 4px 10px;
+        font-size: 12px;
+      }
+      button:hover { background: var(--border); }
+      input, select {
+        background: var(--panel-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 12px;
+      }
+      pre { margin: 0; font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace; font-size: 12px; }
+      .scroll { overflow: auto; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      .col { display: flex; flex-direction: column; }
+      .dim { color: var(--text-dim); }
+      .badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 3px;
+        font-size: 11px;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+      }
+      .badge.ok { color: var(--ok); border-color: var(--ok); }
+      .badge.err { color: var(--err); border-color: var(--err); }
+      .badge.warn { color: var(--warn); border-color: var(--warn); }
+      .badge.running { color: var(--accent); border-color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/bevox-fs"]
+    },
+    "github": {
+      "transport": "sse",
+      "url": "https://mcp.github.example.com/sse",
+      "headers": { "Authorization": "Bearer ${GITHUB_MCP_TOKEN}" }
+    }
+  },
+  "defaults": { "timeoutMs": 15000, "enabledByDefault": true }
+}

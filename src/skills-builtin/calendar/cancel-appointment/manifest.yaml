@@ -1,0 +1,17 @@
+name: cancel-appointment
+version: 1.0.0
+description: Cancel an existing appointment.
+category: calendar
+agentType: surface
+parameters:
+  type: object
+  required: [appointment_id]
+  properties:
+    appointment_id:
+      type: string
+    reason:
+      type: string
+permissions:
+  requires: []
+  sideEffects: [write, external_call]
+entry: index

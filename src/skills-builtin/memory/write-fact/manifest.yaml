@@ -1,0 +1,25 @@
+name: write-fact
+version: 1.0.0
+description: Insert a dynamic fact about the contact. Pipeline agents only.
+category: memory
+agentType: pipeline
+parameters:
+  type: object
+  required: [contact_id, fact_key, fact_value, confidence]
+  properties:
+    contact_id:
+      type: number
+    fact_key:
+      type: string
+    fact_value:
+      type: string
+    category:
+      type: string
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 1
+permissions:
+  requires: []
+  sideEffects: [write]
+entry: index

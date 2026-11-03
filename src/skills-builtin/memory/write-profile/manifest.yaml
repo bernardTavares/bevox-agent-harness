@@ -1,0 +1,19 @@
+name: write-profile
+version: 1.0.0
+description: Update fixed fields on the contact profile. Pipeline agents only.
+category: memory
+agentType: pipeline
+parameters:
+  type: object
+  required: [contact_id, fields]
+  properties:
+    contact_id:
+      type: number
+    fields:
+      type: object
+      description: Key-value pairs matching contact_profiles columns (full_name, phone, email, birth_date, etc.)
+      additionalProperties: true
+permissions:
+  requires: []
+  sideEffects: [write]
+entry: index
