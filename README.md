@@ -73,7 +73,7 @@ Running the worker for real is more involved, and these are the known rough edge
 As one person, AI-native:
 - every non-trivial change started as a design spec (`docs/superpowers/specs/`) and an implementation plan (`docs/superpowers/plans/`);
 - Claude Code subagents executed the plans in parallel git worktrees, under repo-local rules, hooks and reviewer agents (`.claude/`, `CLAUDE.md`);
-- scheduled multi-agent audits then tried to break each claim end to end (`docs/audits/`).
+- scheduled multi-agent audits then tried to break each claim end to end.
 
 Those audits are why this release exists in its current form. They found features that were unit-green but not wired into the live path, such as Reflexion notes that no engine read and a recall getter with no caller. The fixes and invariant tests are merged here.
 
