@@ -66,7 +66,7 @@
     "@opentelemetry/sdk-node": "^0.218.0",
     "@opentelemetry/semantic-conventions": "^1.41.1",
     "ajv": "^8.20.0",
-    "bullmq": "^5.58.5",
+    "bullmq": "^6.5.4",
     "dotenv": "^16.6.1",
     "ioredis": "^5.8.1",
     "js-tiktoken": "^1.0.21",
