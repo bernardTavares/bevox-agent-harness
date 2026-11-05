@@ -1,5 +1,11 @@
 # Bevox Agent Harness
 
+[![tests](https://img.shields.io/badge/tests-1%2C285%20passing-brightgreen)](#) [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](./LICENSE.md) ![language](https://img.shields.io/github/languages/top/bernardTavares/bevox-agent-harness)
+
+![bevox-agent-harness](docs/assets/social-card.png)
+
+> Part of the [4-layer AI-first company series](https://github.com/bernardTavares) ([how the repos fit together](#how-the-repos-fit-together)). License: FSL-1.1-MIT (source-available, converts to MIT after 2 years)
+
 A queue-driven agent runtime in TypeScript. It takes a conversation turn and runs a pre-processing agent pipeline. It then routes the turn to a tool-using agent that picks its own reasoning strategy, assembles context from layered memory under a hard token budget, and gates every tool call through a fail-closed permission system with human-approval modes. The result goes back to the caller through authenticated callbacks.
 
 It is the execution engine of **Bevox**, an AI secretary for appointment-based businesses (clinics first) on WhatsApp and Instagram, built by one person.
@@ -65,7 +71,6 @@ npm run playground            # dev playground
 
 Running the worker for real is more involved, and these are the known rough edges:
 - Postgres needs **pgvector** and **pg_uuidv7**. Plain `postgres:16-alpine` from `docker-compose.yml` is not enough.
-- Migration `001` references an `accounts` table that the harness never creates. Create a stub `accounts(id integer primary key)` before `npm run db:migrate` and drop it afterwards.
 - The harness is a worker and expects a backend that enqueues `ExecutionPayload` jobs and receives the HTTP callbacks. `openapi/agent-harness-v1.yaml` and `skills/bevox-agent-harness-consumer/` describe that contract.
 
 ## How this was built
@@ -78,6 +83,54 @@ As one person, AI-native:
 Those audits are why this release exists in its current form. They found features that were unit-green but not wired into the live path, such as Reflexion notes that no engine read and a recall getter with no caller. The fixes and invariant tests are merged here.
 
 The design docs, specs and audits were written in Portuguese. The code, the API and this README are in English.
+
+## How the repos fit together
+
+This repo is one piece of Bevox's public code. The repos form two systems: the **Company OS**, which ran Bevox's internal operations on one host on top of OpenClaw, and the **infrastructure** the product was built to run on.
+
+```mermaid
+flowchart LR
+  subgraph OPS["Company OS · internal operations, one host"]
+    direction TB
+    BP["bevox-blueprint<br/>management layer: 63 agents, org chart"]
+    RT["bevox-openclaw-runtime<br/>OpenClaw gateway, agents, cron, systemd"]
+    COS["bevox-company-os<br/>kanban · dispatcher · tester"]
+    MC["bevox-mission-control<br/>read-only console"]
+    KS["bevox-knowledge-sync<br/>KB watcher · Telegram approvals"]
+    KC["bevox-knowledge-contribute<br/>Claude Code skill: drafts into the KB"]
+    KB[("knowledge repo<br/>PRDs · ADRs · specs")]
+  end
+  subgraph INFRA["Infrastructure and product"]
+    direction TB
+    HZ["bevox-hetzner-mcp<br/>agent-native Hetzner control plane"]
+    H["bevox-agent-harness<br/>product agent runtime"]
+    MA["bevox-meta-api<br/>WhatsApp/Instagram gateway on k3s"]
+  end
+  BP -->|delegates to| COS
+  COS -->|runs on| RT
+  KS -->|plugins loaded by| RT
+  KC -->|drafts| KB
+  KS -->|watches · approves| KB
+  KB -->|plans and specs| COS
+  COS -->|state files| MC
+  KS -->|state| MC
+  HZ -->|built to host| H
+  HZ -->|kubectl_apply on k3s| MA
+  classDef here stroke:#f59e0b,stroke-width:4px
+  class H here
+```
+
+| Repo | Role | Runs with |
+|---|---|---|
+| [bevox-openclaw-runtime](https://github.com/bernardTavares/bevox-openclaw-runtime) | OpenClaw gateway config, agents (Vox + local Qwen), cron jobs, systemd units | everything in the Company OS runs on it |
+| [bevox-company-os](https://github.com/bernardTavares/bevox-company-os) | Supervised agents: plan → kanban → headless Claude Code → tester → Telegram | runtime, mission-control, knowledge-sync |
+| [bevox-mission-control](https://github.com/bernardTavares/bevox-mission-control) | Read-only web console over the Company OS state (fork of TenacitOS) | company-os, knowledge-sync |
+| [bevox-knowledge-sync](https://github.com/bernardTavares/bevox-knowledge-sync) | Knowledge-repo watcher + OpenClaw plugins for approvals on Telegram | runtime, knowledge-contribute |
+| [bevox-knowledge-contribute](https://github.com/bernardTavares/bevox-knowledge-contribute) | Claude Code skill that writes PRDs, ADRs and specs as draft branches | knowledge-sync |
+| [bevox-blueprint](https://github.com/bernardTavares/bevox-blueprint) | Management layer: 63 Claude Code agents, org chart, RACI, OKRs | company-os |
+| [bevox-hetzner-mcp](https://github.com/bernardTavares/bevox-hetzner-mcp) | MCP server + REST control plane for Hetzner Cloud with an approval gate | built to host the agent harness; manages meta-api's k3s |
+| [bevox-meta-api](https://github.com/bernardTavares/bevox-meta-api) | Multi-tenant WhatsApp/Instagram gateway that ran in production on k3s | hetzner-mcp |
+| [bevox-agent-harness](https://github.com/bernardTavares/bevox-agent-harness) | The product's agent runtime: per-step reasoning escalation, token-budgeted context, fail-closed permissions, evals, MCP | hetzner-mcp |
 
 ## License
 
